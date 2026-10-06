@@ -6,6 +6,7 @@ import {
   CREATURE_CAP, ECOLOGY_INTERVAL, allowsBreeding, assessTerritory, buildCensus, ecoOnCreatureDeath, ecologyTick, spawnAllowedByEcology, type TerritoryEcology,
 } from "./ecology";
 import { migrationIntent, perceiveWildlife, predatesOn, profileOf, seizeTerritory, settleMigration } from "./wildlife";
+import { abstractDroppedCreature, advanceDistantEcosystem, materializeDistantChunk } from "./distant";
 import { engage, groundTick, initField, isHostile, partyCombatTurn, partyMonAt, regroupParty, wildCombatTurn } from "./combat";
 import {
   CAVE_DENSITY, CAVE_FAUNA, CAVE_LEVEL_BONUS, CAVE_UPPER, CLIMB_AVOID, FALL_TIME, HEAVY_CLIMB_AVOID, MOUTH_BURROWERS, MOUTH_BURROWER_CHANCE,
@@ -30,7 +31,7 @@ export { sightRadius } from "./perception";
 export const CHUNK = 16;
 const LOAD_R = 3;
 const SIM_R = 30;
-export const SAVE_VERSION = 17;
+export const SAVE_VERSION = 18;
 export { PEN_MAX } from "./data";
 export const INN_COST = 12;
 
@@ -154,7 +155,7 @@ export function dangerLevel(world: World, x: number, y: number, biome: string, h
   return clamp(1 + Math.floor(d / 70) + (d > 60 ? DANGER_BONUS[biome] ?? 0 : 0) + (h % 3), 1, 50);
 }
 
-function makeCreature(id: string, speciesId: string, x: number, y: number, level: number, h: number, alpha: boolean): WildCreature {
+export function makeCreature(id: string, speciesId: string, x: number, y: number, level: number, h: number, alpha: boolean): WildCreature {
   const sp = SPECIES[speciesId];
   const rng = new Rng(h);
   const personality = rollPersonality(rng);
@@ -175,7 +176,7 @@ function makeCreature(id: string, speciesId: string, x: number, y: number, level
 }
 
 /** True when a footprint-sized area (2×2 for huge creatures) is open ground with no creatures, not straddling a cliff. */
-function fitsFootprint(state: GameState, world: World, x: number, y: number, fp: number, layer = SURFACE): boolean {
+export function fitsFootprint(state: GameState, world: World, x: number, y: number, fp: number, layer = SURFACE): boolean {
   if (!bodyLevelOk(world, layer, x, y, fp)) return false;
   for (let dy = 0; dy < fp; dy++) {
     for (let dx = 0; dx < fp; dx++) {
@@ -265,6 +266,7 @@ function spawnCaveChunk(state: GameState, world: World, cx: number, cy: number, 
   const hf = heightOf(world);
   const fauna = CAVE_FAUNA[layer];
   if (!fauna) return;
+  if (materializeDistantChunk(state, world, cx, cy)) return;
   for (let i = 0; i < 5; i++) {
     const h = hash3(state.seed ^ 0xcafe ^ (layer & 0xff), cx, cy, i);
     const x = cx * CHUNK + (h % CHUNK);
@@ -314,8 +316,10 @@ function spawnChunk(state: GameState, world: World, cx: number, cy: number): voi
     return;
   }
   spawnMouthBurrowers(state, world, cx, cy);
-  const census = buildCensus(state, world, layer);
-  for (let i = 0; i < 7; i++) {
+  // Phase 11: a chunk with abstract populations materializes them instead of fresh spawns
+  if (!materializeDistantChunk(state, world, cx, cy)) {
+    const census = buildCensus(state, world, layer);
+    for (let i = 0; i < 7; i++) {
     const h = hash3(state.seed ^ 0x5eed, cx, cy, i);
     const x = cx * CHUNK + (h % CHUNK);
     const y = cy * CHUNK + ((h >>> 8) % CHUNK);
@@ -337,6 +341,7 @@ function spawnChunk(state: GameState, world: World, cx: number, cy: number): voi
     const lv = dangerLevel(world, x, y, t.biome, h >>> 22);
     state.creatures[id] = makeCreature(id, sp, x, y, lv, h, false);
     ensureTerritory(state, state.creatures[id]);
+  }
   }
   for (const f of world.featuresNear(cx * CHUNK + 8, cy * CHUNK + 8, 8)) {
     if (f.kind !== "lair" || !f.speciesId) continue;
@@ -380,6 +385,9 @@ export function loadChunks(state: GameState): void {
       const c = state.creatures[id];
       const home = homeAnchor(state, c);
       if (drop.has(chunkKey(c.layer ?? SURFACE, Math.floor(home.x / CHUNK), Math.floor(home.y / CHUNK)))) {
+        // Phase 11: ordinary wildlife folds into the chunk's abstract population;
+        // anchored spawns and exceptional individuals persist as individuals.
+        if (!abstractDroppedCreature(state, c)) continue;
         abandonNestsOf(state, id);
         delete state.creatures[id];
       }
@@ -396,6 +404,10 @@ export function loadChunks(state: GameState): void {
  */
 export function changeLayer(state: GameState, layer: number): void {
   for (const id of Object.keys(state.creatures)) {
+    const c = state.creatures[id];
+    // ordinary wildlife persists as an abstract population; anchored spawns and
+    // exceptional individuals unload exactly as they always did across layers
+    abstractDroppedCreature(state, c);
     abandonNestsOf(state, id);
     delete state.creatures[id];
   }
@@ -893,6 +905,8 @@ export function advance(state: GameState, ticks: number, safe = false): void {
       }
     }
     simWildlife(state, world, safe);
+    // distant regions keep evolving while the player is away (bounded work per tick)
+    advanceDistantEcosystem(state, world);
     // reproductive state follows simulation time: cooldowns tick down, development completes
     advanceReproduction(state);
     // eggs incubate and gestations progress; completed development creates the offspring

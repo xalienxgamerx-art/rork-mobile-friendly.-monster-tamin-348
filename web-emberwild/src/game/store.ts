@@ -10,6 +10,7 @@ import { migrateHeight } from "./height";
 import { migrateGrowth } from "./growth";
 import { migrateEcology } from "./ecology";
 import { migrateLineages } from "./lineage";
+import { migrateDistant } from "./distant";
 import { getWorld } from "./world";
 import { migrateFactionKnowledge } from "./factions";
 import { ensureKnowledge } from "./knowledge";
@@ -156,6 +157,8 @@ export function loadSave(): boolean {
     migrateEcology(gs);
     // v17 lineages: persistent ancestry records — idempotent, runs on every load
     migrateLineages(gs);
+    // v18 distant worlds: abstract population state — idempotent, runs on every load
+    migrateDistant(gs);
     gs.version = SAVE_VERSION;
     if (gs.version !== SAVE_VERSION) return false;
     store.gs = gs;

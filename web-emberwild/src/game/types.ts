@@ -409,6 +409,46 @@ export interface Territory {
   layer?: number;
 }
 
+/**
+ * One abstract distant population (Phase 11): the aggregate standing of one
+ * species in one chunk-region while no individual body simulates it. Mean
+ * genes carry the population's accumulated selection state; the seed makes
+ * abstract births, deaths and migration deterministic.
+ */
+export interface AbstractPop {
+  speciesId: string;
+  /** Individual members represented by this aggregate (adults + juveniles). */
+  count: number;
+  juveniles: number;
+  /** Mean expressed genes across abstracted members. */
+  genes: Genes;
+  /** Mean condition (0–100). */
+  satiety: number;
+  /** Mean danger level of members (drives materialized levels). */
+  level: number;
+  /** Population-level ancestry: the first lineage observed among members. */
+  lineageId: string | null;
+  /** Deterministic seed for abstract ecological decisions. */
+  seed: number;
+}
+
+/**
+ * A distant chunk-region simulated abstractly (Phase 11). While the player is
+ * away its wildlife lives here as aggregate populations that keep breeding,
+ * dying, competing and migrating through the shared ecological rules.
+ */
+export interface DistantRegion {
+  key: string;
+  layer: number;
+  cx: number;
+  cy: number;
+  pops: AbstractPop[];
+  /** Last tick the abstract simulation stepped (elapsed-time processing). */
+  lastTick: number;
+  /** True once real bodies were folded into these populations. */
+  abstracted: boolean;
+}
+
 export interface GameState {
   version: number;
   seedText: string;
@@ -463,5 +503,7 @@ export interface GameState {
   lineages?: Record<string, LineageRecord>;
   /** Bounded parent → child ids index for lineage queries (Phase 10). */
   childIndex?: Record<string, string[]>;
+  /** Abstract distant populations, key = `d:<layer>:<cx>,<cy>` (Phase 11; backfilled by migrateDistant). */
+  distant?: Record<string, DistantRegion>;
   knowledge: WorldKnowledge;
 }

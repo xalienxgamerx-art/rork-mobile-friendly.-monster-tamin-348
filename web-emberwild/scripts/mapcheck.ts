@@ -1,7 +1,7 @@
 /* Headless sanity check for the knowledge/perception/mapview systems + live combat. */
 import { discoveredList, ensureKnowledge, tileVisibility, anyExplored, exploredWorldCells, isRegionSeen } from "../src/game/knowledge";
 import { aggrOf, avOf, dvOf, engage, hitInfo, initField, partyFighter, partyMonAt, queueSkill, setAggr, setOrder, setTarget, terrainAt, wildFighter } from "../src/game/combat";
-import { advance, creatureAt, loadChunks, newGame, movePlayer, previewStarter, requestBreeding, spawnLairPack, waitTurn, wildToMonster } from "../src/game/sim";
+import { CHUNK, advance, chunkKey, creatureAt, loadChunks, newGame, movePlayer, previewStarter, requestBreeding, spawnLairPack, waitTurn, wildToMonster } from "../src/game/sim";
 import { BIOMES, ITEMS, SCARVES, SPECIES, footprintOf, developmentTypeFor } from "../src/game/data";
 import { abandonNestsOf, advanceDevelopment, beginBreeding, destroyNest, migrateBreeding, offspringSpecies, planChild, previewBreeding } from "../src/game/breeding";
 import { Factions, getFactions, migrateFactionKnowledge } from "../src/game/factions";
@@ -9,13 +9,14 @@ import { GENE_KEYS, driftGenome, expressGene, getGeneGrade, getMonsterFootprint,
 import { createMonster, displayName, migrateMonsterSex, rollSex, statOf, statsOf } from "../src/game/monster";
 import { canMate } from "../src/game/mating";
 import { BREED_COOLDOWN_TICKS, DEVELOP_TICKS, MATURITY_LEVEL, advanceReproduction, beginReproduction, canReproduce, isBreedingAvailable, makeReproProfile, migrateRepro, migrateReproCreature, migrateReproMon, maturityFor, reproStateOf, wildReproMode } from "../src/game/reproduction";
-import { Rng } from "../src/game/rng";
+import { Rng, hashString } from "../src/game/rng";
 import { hasLOS } from "../src/game/perception";
 import { sampleCell } from "../src/game/mapview";
 import { getWorld, seedFromText, type Feature } from "../src/game/world";
-import type { Disposition, GameState, GeneKey, GenePair, Genome, Monster, ReproductiveDevelopment, Sex, WildCreature } from "../src/game/types";
+import type { ChildBlueprint, Disposition, DistantRegion, GameState, GeneKey, GenePair, Genes, Genome, Monster, ReproductiveDevelopment, Sex, WildCreature } from "../src/game/types";
 import { childrenOf, lineageSummary, migrateLineages, recordLineageBirth, relatedness } from "../src/game/lineage";
 import { profileOf, seizeTerritory } from "../src/game/wildlife";
+import { DISTANT_INTERVAL, MAT_CAP_REGION, advanceDistantEcosystem, distantKey, migrateDistant, stepRegion } from "../src/game/distant";
 import { performance } from "node:perf_hooks";
 import { readFileSync } from "node:fs";
 import { HERO_ASPECT, isScarfPixel, parseHex, scarfShade } from "../src/game/scarf";
@@ -738,7 +739,7 @@ ok(
 // save round trip: live-combat state persists
 const json = JSON.stringify(gs);
 const loaded = JSON.parse(json);
-ok(loaded.version === 17, "save version 17");
+ok(loaded.version === 18, "save version 18");
 ok(loaded.field && loaded.orders && loaded.ground && loaded.fighters && loaded.aggr && loaded.skillQ && "target" in loaded, "live-combat state persists");
 ok(Object.keys(loaded.knowledge.explored).length === after, "explored persists exactly");
 
@@ -2441,7 +2442,7 @@ console.log("\n-- ECOLOGY --");
   ok(teleported && Object.keys(g.creatures).length >= 3, `spawning still works in unclaimed wilds (${Object.keys(g.creatures).length} residents)`);
   advance(g, 90);
   ok(g.party[0].hp >= 0 && Object.keys(g.creatures).length <= CREATURE_CAP, "advance() runs cleanly with the ecology tick wired in");
-  ok(g.version === 17, "save version 17");
+  ok(g.version === 18, "save version 18");
   migrateEcology(g);
   const snap = JSON.stringify(g.ecology);
   migrateEcology(g);
@@ -2745,6 +2746,198 @@ console.log("\n-- WILDLIFE --");
     advance(g, 40);
     const ms = performance.now() - t0;
     ok(ms < 5000, `AI processing remains bounded (${Math.round(ms)}ms for 40 ticks, ${Object.keys(g.creatures).length} bodies)`);
+  }
+}
+
+/* ---------------- Phase 11: persistent distant ecosystem ---------------- */
+{
+  const g = newGame("DIST-1", "R", "wanderer", "#e8742a", previewStarter("DIST-1", "slimekin"));
+  g.party[0].level = 12;
+  g.party[0].hp = statOf(g.party[0], "hp");
+  const w = getWorld(g.seed);
+  let stage: { cx: number; cy: number; x: number; y: number } | null = null;
+  for (let r = 500; r < 1600 && !stage; r += 40) {
+    for (let a = 0; a < 16 && !stage; a++) {
+      const ang = (a / 16) * Math.PI * 2;
+      const x = Math.round(g.player.x + Math.cos(ang) * r);
+      const y = Math.round(g.player.y + Math.sin(ang) * r);
+      if (!w.inBounds(x, y)) continue;
+      const t = w.tile(x, y);
+      if (t.biome !== "meadow" || !BIOMES[t.biome].passable || t.feature || w.siteAt(x, y)) continue;
+      stage = { cx: Math.floor(x / CHUNK), cy: Math.floor(y / CHUNK), x: Math.floor(x / CHUNK) * CHUNK + 4, y: Math.floor(y / CHUNK) * CHUNK + 4 };
+    }
+  }
+  ok(!!stage, "found a quiet meadow stage for distant simulation");
+  if (stage) {
+    const { cx, cy, x: bx, y: by } = stage;
+    for (const id of Object.keys(g.creatures)) delete g.creatures[id];
+    g.loadedChunks = [chunkKey(0, cx, cy)];
+    g.player.x = bx;
+    g.player.y = by;
+    const flatGenes = (v: number): Genes => {
+      const o = {} as Genes;
+      for (const k of GENE_KEYS) o[k] = v;
+      return o;
+    };
+    const mk = (id: string, speciesId: string, dx: number, dy: number, opts: { satiety?: number; level?: number; bornTick?: number; gen?: number } = {}): WildCreature => {
+      const c: WildCreature = {
+        id, speciesId, level: opts.level ?? 6, x: bx + dx, y: by + dy, homeX: bx + dx, homeY: by + dy, hpFrac: 1,
+        satiety: opts.satiety ?? 80, disposition: "calm", activity: "Wandering", personality: "gentle", geneSeed: 777,
+        genes: wildGenotypeFromSeed(777 + hashString(id), speciesId), gen: opts.gen ?? 1, lineageId: `L:${id}`,
+        repro: makeReproProfile(wildReproMode(id, speciesId), opts.level ?? 6, 0), bornTick: opts.bornTick,
+        calmUntil: g.tick + 100000, alpha: false, affection: 0, stalking: false,
+      };
+      g.creatures[id] = c;
+      return c;
+    };
+    // controlled population: 10 adult + 2 juvenile slimekin, 3 cindermaw predators, 1 exceptional slimekin
+    for (let i = 0; i < 10; i++) mk(`d${i}`, "slimekin", (i % 4) * 2, Math.floor(i / 4) * 2);
+    mk("dj1", "slimekin", 7, 4, { bornTick: g.tick - 400 });
+    mk("dj2", "slimekin", 5, 4, { bornTick: g.tick - 400 });
+    for (let i = 0; i < 3; i++) mk(`dc${i}`, "cindermaw", 1 + i * 2, 8);
+    mk("de1", "slimekin", 8, 6, { gen: 5 });
+    // a wild brood whose egg must keep developing while the region is abstracted
+    const nest = createNest(g, "d0", "slimekin", bx + 3, by + 1);
+    attachNest(g, nest, "d0");
+    const child = {
+      speciesId: "slimekin", sex: "female" as Sex, level: 2, genes: wildGenotypeFromSeed(4242, "slimekin"),
+      mutations: [], personality: "gentle", skills: ["tackle"], plus: 0, bond: 0,
+      generation: 2, lineageId: "L:d0", mutHistory: [], parents: ["d0", "d2"] as [string, string], parentNames: ["d0", "d2"],
+    };
+    const dev: ReproductiveDevelopment = {
+      id: "d:far", parentIds: ["d0", "d2"], speciesId: "slimekin", pairing: "sexual", type: "egg", state: "developing",
+      startTick: g.tick, completeTick: g.tick + 500, nestId: nest.id, origin: "wild", child,
+    };
+    g.developments["d:far"] = dev;
+    nest.developmentIds.push("d:far");
+    // leave: the chunk unloads and its wildlife folds into abstract populations
+    g.player.x = bx + CHUNK * 7;
+    loadChunks(g);
+    const key = distantKey(0, cx, cy);
+    const reg = g.distant?.[key];
+    ok(!!reg && reg.abstracted, "leaving a region folds its wildlife into an abstract population");
+    const slimePop = reg?.pops.find((p) => p.speciesId === "slimekin");
+    ok(slimePop?.count === 12, `abstract population counts every ordinary member (${slimePop?.count})`);
+    ok(slimePop?.juveniles === 2, "life-stage mix survives abstraction");
+    ok(reg?.pops.find((p) => p.speciesId === "cindermaw")?.count === 3, "predators abstract into their own population");
+    ok(slimePop?.lineageId === "L:d0", "population-level ancestry is preserved");
+    ok(!!g.creatures["de1"], "exceptional individuals remain individually represented");
+    ok(!g.creatures["d0"] && !g.creatures["dc0"], "abstracted members no longer exist as bodies");
+
+    // ---- unit-level abstract ecology on crafted regions ----
+    const chunkOk = (ax: number, ay: number, biome?: string): boolean => {
+      const x2 = ax * CHUNK + 8;
+      const y2 = ay * CHUNK + 8;
+      if (!w.inBounds(x2, y2)) return false;
+      const t = w.tile(x2, y2);
+      if (t.feature || w.siteAt(x2, y2)) return false;
+      return biome ? t.biome === biome : BIOMES[t.biome].passable;
+    };
+    const ring: [number, number][] = [];
+    for (let dy = -6; dy <= 6; dy++) for (let dx = -6; dx <= 6; dx++) ring.push([cx + dx, cy + dy]);
+    const foodScore = (ax: number, ay: number): number => {
+      const sx = ax * CHUNK + 8;
+      const sy = ay * CHUNK + 8;
+      let s = 0;
+      for (const [fx, fy] of [[0, 0], [7, 0], [-7, 0], [0, 7], [0, -7]] as const) {
+        if (!w.inBounds(sx + fx, sy + fy)) return -1;
+        const t = w.tile(sx + fx, sy + fy);
+        if (t.feature || w.siteAt(sx + fx, sy + fy)) return -1;
+        const b = BIOMES[t.biome];
+        if (!b.passable) return -1;
+        s += b.forageChance * (1 + b.forage.reduce((a, [, wt]) => a + wt, 0) / 8);
+      }
+      return s;
+    };
+    const pool = ring
+      .filter(([ax, ay]) => (ax !== cx || ay !== cy) && foodScore(ax, ay) >= 0)
+      .sort((a, b) => foodScore(b[0], b[1]) - foodScore(a[0], a[1]))
+      .slice(0, 5);
+    ok(pool.length >= 5, "found distant test chunks for controlled ecology");
+    const craftRegion = (ax: number, ay: number, pops: { speciesId: string; count: number; juveniles?: number; satiety?: number; level?: number; seed?: number }[]): DistantRegion => {
+      const r2: DistantRegion = {
+        key: distantKey(0, ax, ay), layer: 0, cx: ax, cy: ay, lastTick: g.tick, abstracted: true,
+        pops: pops.map((p) => ({ speciesId: p.speciesId, count: p.count, juveniles: p.juveniles ?? 0, genes: flatGenes(55), satiety: p.satiety ?? 80, level: p.level ?? 6, lineageId: null, seed: p.seed ?? (hashString(p.speciesId) ^ 0xabcd) })),
+      };
+      g.distant = g.distant ?? {};
+      g.distant[r2.key] = r2;
+      return r2;
+    };
+    if (pool.length >= 5) {
+      // growth under favorable conditions: a small population below carrying capacity
+      const grow = craftRegion(pool[0][0], pool[0][1], [{ speciesId: "slimekin", count: 2 }]);
+      stepRegion(g, w, grow, 30);
+      ok(grow.pops[0] && grow.pops[0].count > 2, `populations grow under favorable ecological conditions (${grow.pops[0]?.count} after 30 days)`);
+      // decline under scarcity and crowding
+      const shrink = craftRegion(pool[1][0], pool[1][1], [{ speciesId: "slimekin", count: 20, juveniles: 4 }]);
+      stepRegion(g, w, shrink, 6);
+      ok(shrink.pops[0] && shrink.pops[0].count < 20 && shrink.pops[0].count >= 0, `overcrowded populations decline toward carrying capacity (${shrink.pops[0]?.count})`);
+      // predation couples predator and prey
+      const hunt = craftRegion(pool[2][0], pool[2][1], [
+        { speciesId: "slimekin", count: 20 },
+        { speciesId: "cindermaw", count: 4 },
+      ]);
+      stepRegion(g, w, hunt, 5);
+      const prey = hunt.pops.find((p) => p.speciesId === "slimekin");
+      const pred = hunt.pops.find((p) => p.speciesId === "cindermaw");
+      ok(prey && prey.count < 20, `predation reduces prey populations (${prey?.count} prey left)`);
+      ok(pred && pred.count >= 4, "predator populations persist off prey availability");
+      ok(
+        [grow, shrink, hunt].every((r2) => r2.pops.every((p) => Number.isFinite(p.count) && p.count >= 0 && p.juveniles >= 0 && p.juveniles <= p.count && Number.isFinite(p.satiety))),
+        "population counts never become negative or non-finite",
+      );
+      // migration transfers members without duplication or loss
+      const mig = craftRegion(pool[3][0], pool[3][1], [{ speciesId: "slimekin", count: 30, juveniles: 6, seed: 0x51ce }]);
+      const slimeTotal = (): number => Object.values(g.distant ?? {}).reduce((a, r2) => a + (r2.pops.find((p) => p.speciesId === "slimekin")?.count ?? 0), 0);
+      const beforeKeys = new Set(Object.keys(g.distant ?? {}));
+      const totalBefore = slimeTotal();
+      stepRegion(g, w, mig, 1);
+      const arrivals = Object.values(g.distant ?? {}).filter((r2) => !beforeKeys.has(r2.key) && r2.pops.some((p) => p.speciesId === "slimekin"));
+      ok(arrivals.length >= 1, "dispersing members arrive in a neighboring region");
+      const totalAfter = slimeTotal();
+      ok(totalAfter <= totalBefore && totalAfter >= totalBefore - 8, `migration transfers population without duplication (${totalAfter}/${totalBefore} after mortality)`);
+      // bounded catch-up, applied exactly once
+      const far = craftRegion(pool[4][0], pool[4][1], [{ speciesId: "slimekin", count: 10, juveniles: 2 }]);
+      far.lastTick = g.tick - 100 * DISTANT_INTERVAL;
+      advanceDistantEcosystem(g, w);
+      ok(far.lastTick === g.tick, "long absences fold into bounded catch-up (never unbounded)");
+      const snap1 = JSON.stringify(far.pops.map((p) => [p.speciesId, p.count]));
+      advanceDistantEcosystem(g, w);
+      ok(snap1 === JSON.stringify(far.pops.map((p) => [p.speciesId, p.count])), "repeated updates never apply the same elapsed period twice");
+    }
+
+    // ---- absence changes the world, then the region materializes on return ----
+    advance(g, 2 * DISTANT_INTERVAL + 20);
+    const broodDev = g.developments["d:far"];
+    ok(!!broodDev && broodDev.state === "completed" && !!broodDev.resultId && !!g.creatures[broodDev.resultId!], "developing offspring complete while their region is abstracted");
+    const popSnap = reg?.pops.map((p) => ({ speciesId: p.speciesId, count: p.count, juveniles: p.juveniles, genes: { ...p.genes }, lineageId: p.lineageId }));
+    g.player.x = bx;
+    g.player.y = by;
+    loadChunks(g);
+    const bodies = Object.values(g.creatures).filter((c) => c.id.startsWith(`w:${cx}:${cy}:`));
+    ok(bodies.length >= 1 && bodies.length <= MAT_CAP_REGION, `returning materializes a bounded slice of the population (${bodies.length} bodies)`);
+    ok(bodies.every((c) => Math.floor(c.x / CHUNK) === cx && Math.floor(c.y / CHUNK) === cy), "materialized bodies occupy valid tiles inside their region");
+    const popSlime = popSnap?.find((p) => p.speciesId === "slimekin");
+    const matSlime = bodies.filter((c) => c.speciesId === "slimekin");
+    ok(!!popSlime && matSlime.length >= 1 && matSlime.every((c) => GENE_KEYS.every((k) => Math.abs(expressGene(c.genes[k]) - popSlime.genes[k]) <= 8)), "materialized genetics descend from the population's accumulated gene pool");
+    if (popSlime?.lineageId) ok(matSlime.every((c) => c.lineageId === popSlime.lineageId), "population-level ancestry carries into materialized bodies");
+    if ((popSlime?.juveniles ?? 0) >= 2 && matSlime.length > 0) ok(matSlime.some((c) => c.bornTick !== undefined), "juveniles materialize with their growth state intact");
+    ok(!Object.keys(g.creatures).some((id) => id.startsWith(`c:${cx}:${cy}:`)), "chunks under population management skip generic respawns (no duplication)");
+    const stillAbstract = g.distant?.[key]?.pops.find((p) => p.speciesId === "slimekin");
+    if (popSlime) ok(matSlime.length + (stillAbstract?.count ?? 0) === popSlime.count, `population accounting reconciles across materialization (${matSlime.length}+${stillAbstract?.count ?? 0}=${popSlime.count})`);
+    ok(!!g.creatures["de1"], "unique individuals were never merged into anonymous populations");
+
+    // ---- persistence: abstract populations survive save/load ----
+    const saved = JSON.parse(JSON.stringify(g)) as GameState;
+    const popSig = (s: GameState): string => JSON.stringify(Object.keys(s.distant ?? {}).sort().flatMap((k) => (s.distant ?? {})[k].pops.map((p) => [k, p.speciesId, p.count, p.juveniles, p.lineageId])));
+    const before = popSig(saved);
+    migrateDistant(saved);
+    migrateDistant(saved);
+    ok(popSig(saved) === before, "abstract populations survive save/load migration unchanged (idempotent)");
+    const legacy = JSON.parse(JSON.stringify(saved)) as GameState;
+    delete legacy.distant;
+    migrateDistant(legacy);
+    ok(!!legacy.distant && Object.keys(legacy.distant).length === 0, "older saves gain distant-state defaults through migration");
   }
 }
 
