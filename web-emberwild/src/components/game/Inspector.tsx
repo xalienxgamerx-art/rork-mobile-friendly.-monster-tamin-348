@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef } from "react";
 import { BedDouble, Cloud, CloudFog, CloudLightning, CloudRain, CloudSnow, Coins, Droplets, Feather, Flame, Footprints, Leaf, Mountain, MapPinned, MessageCircle, PawPrint, Scale, Shield, Sun, Swords, Thermometer, Wind, Crown, Navigation, Utensils } from "lucide-react";
+import { NPC_ART } from "@/game/assets";
 import { aggrOf, queueSkill, setAggr, setOrder, statusesOf, wildMonster } from "@/game/combat";
 import { BIOMES, ITEMS, PERSONALITIES, SKILLS, SPECIES, STATUSES, STAT_LABEL, TRAITS } from "@/game/data";
 import { getFactions } from "@/game/factions";
@@ -191,6 +192,7 @@ export function NpcCard({ npc, gs, onTalk, onApproach }: { npc: Npc; gs: GameSta
   return (
     <div className="panel-parchment corners p-3">
       <div className="mb-1 flex flex-wrap items-center gap-x-2 font-serif text-[17px] font-extrabold">
+        <img src={NPC_ART[npc.role]} alt="" className="h-10 w-10 object-contain" style={{ imageRendering: "pixelated" }} />
         <Icon className="h-4 w-4 opacity-70" />
         {npc.name}
         <span className="font-pixel text-sm font-normal opacity-70">{role.title}</span>

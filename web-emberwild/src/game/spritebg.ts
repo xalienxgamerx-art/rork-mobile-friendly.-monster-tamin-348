@@ -153,9 +153,23 @@ export function stripBlackBackground(src: RawImage, ov: { T?: number; seed?: Rec
 
 /** Blend dark pixels that hug transparency toward nearby body color (kills dark halos). */
 export function defringeEdges(img: RawImage, radius = DEFRINGE_RADIUS): void {
+  defringe(img, radius, "dark");
+}
+
+/** Blend bright pixels that hug transparency toward nearby body color (kills white halos). */
+export function defringeLightEdges(img: RawImage, radius = DEFRINGE_RADIUS): void {
+  defringe(img, radius, "light");
+}
+
+/** Shared fringe pass: edge pixels of the given polarity pull toward body color. */
+function defringe(img: RawImage, radius: number, mode: "dark" | "light"): void {
   const { w, h } = img;
   const snap = Uint8Array.from(img.data);
   const transparent = (x: number, y: number): boolean => snap[(y * w + x) * 4 + 3] === 0;
+  const fringeLum = mode === "dark" ? DEFRINGE_DARK_LUM : 216;
+  const bodyLum = mode === "dark" ? DEFRINGE_BODY_LUM : 200;
+  const isFringe = (o: number): boolean => (mode === "dark" ? lumAt(snap, o) < fringeLum : lumAt(snap, o) >= fringeLum);
+  const isBody = (o: number): boolean => (mode === "dark" ? lumAt(snap, o) >= bodyLum : lumAt(snap, o) < bodyLum);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const o = (y * w + x) * 4;
@@ -170,14 +184,14 @@ export function defringeEdges(img: RawImage, radius = DEFRINGE_RADIUS): void {
           }
         }
       }
-      if (!nearEdge || lumAt(snap, o) >= DEFRINGE_DARK_LUM) continue;
+      if (!nearEdge || !isFringe(o)) continue;
       let br = -1, bg = -1, bb = -1, bd = radius + 1;
       for (let dy = -radius; dy <= radius; dy++) {
         for (let dx = -radius; dx <= radius; dx++) {
           const nx = x + dx, ny = y + dy;
           if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
           const no = (ny * w + nx) * 4;
-          if (snap[no + 3] === 0 || lumAt(snap, no) < DEFRINGE_BODY_LUM) continue;
+          if (snap[no + 3] === 0 || !isBody(no)) continue;
           const d = Math.abs(dx) + Math.abs(dy);
           if (d < bd) {
             bd = d;
@@ -193,6 +207,57 @@ export function defringeEdges(img: RawImage, radius = DEFRINGE_RADIUS): void {
       img.data[o + 2] = Math.round(snap[o + 2] * (1 - DEFRINGE_MIX) + bb * DEFRINGE_MIX);
     }
   }
+}
+
+/**
+ * Remove a white studio background while keeping the art's own whites (aprons,
+ * shirts, highlights). Only pixels flood-connected to the border through
+ * near-white are removed — interior whites sit behind dark pixel outlines and
+ * are unreachable, so there is deliberately no pocket pass. Idempotent on
+ * already-transparent art (the border carries no opaque white).
+ */
+export function stripWhiteBackground(src: RawImage, whiteMin = 246): RawImage {
+  const { w, h } = src;
+  const white = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const o = i * 4;
+    if (Math.min(src.data[o], src.data[o + 1], src.data[o + 2]) >= whiteMin) white[i] = 1;
+  }
+  const remove = new Uint8Array(w * h);
+  const queue = new Int32Array(w * h);
+  let qn = 0;
+  const seed = (i: number): void => {
+    if (white[i] && src.data[i * 4 + 3] > 0 && !remove[i]) {
+      remove[i] = 1;
+      queue[qn++] = i;
+    }
+  };
+  for (let x = 0; x < w; x++) {
+    seed(x);
+    seed((h - 1) * w + x);
+  }
+  for (let y = 0; y < h; y++) {
+    seed(y * w);
+    seed(y * w + w - 1);
+  }
+  if (qn === 0) return { w, h, data: Uint8Array.from(src.data) };
+  let qh = 0;
+  while (qh < qn) {
+    const i = queue[qh++];
+    const x = i % w, y = (i / w) | 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        seed(ny * w + nx);
+      }
+    }
+  }
+  const out: RawImage = { w, h, data: Uint8Array.from(src.data) };
+  for (let i = 0; i < w * h; i++) if (remove[i]) out.data[i * 4 + 3] = 0;
+  defringeLightEdges(out);
+  return out;
 }
 
 // --- browser-side loader (never imported by tests) ---

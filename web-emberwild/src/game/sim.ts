@@ -7,6 +7,7 @@ import {
 } from "./ecology";
 import { migrationIntent, perceiveWildlife, predatesOn, profileOf, seizeTerritory, settleMigration } from "./wildlife";
 import { abstractDroppedCreature, advanceDistantEcosystem, materializeDistantChunk } from "./distant";
+import { CARRION_SIGHT, SCAVENGE_FOOD, eatCarrion, nearestCarrion, rotTick, spawnCarrion } from "./carrion";
 import { engage, groundTick, initField, isHostile, partyCombatTurn, partyMonAt, regroupParty, wildCombatTurn } from "./combat";
 import {
   CAVE_DENSITY, CAVE_FAUNA, CAVE_LEVEL_BONUS, CAVE_UPPER, CLIMB_AVOID, FALL_TIME, HEAVY_CLIMB_AVOID, MOUTH_BURROWERS, MOUTH_BURROWER_CHANCE,
@@ -31,7 +32,7 @@ export { sightRadius } from "./perception";
 export const CHUNK = 16;
 const LOAD_R = 3;
 const SIM_R = 30;
-export const SAVE_VERSION = 18;
+export const SAVE_VERSION = 19;
 export { PEN_MAX } from "./data";
 export const INN_COST = 12;
 
@@ -102,6 +103,8 @@ export function newGame(seedText: string, name: string, origin: OriginId, scarf:
     broodSeq: 0,
     territories: {},
     territorySeq: 0,
+    carrion: {},
+    carrionSeq: 0,
     knowledge: emptyKnowledge(),
   };
   const mon: Monster = { ...starter, uid: "m1", origin: `Raised in ${start.name}`, bond: 60 };
@@ -555,6 +558,7 @@ function simWildlife(state: GameState, world: World, safe: boolean): void {
         abandonNestsOf(state, c.id);
         releaseTerritoryOwner(state, c.id);
         ecoOnCreatureDeath(state, c);
+        spawnCarrion(state, c);
         delete state.creatures[c.id];
         occDel(occ, c, state.tick);
         if (cheb(c.x, c.y, px, py) <= 10) addLog(state, `A starving ${sp.name} collapses ${compass(c.x - px, c.y - py)} and does not rise.`, "bad");
@@ -663,6 +667,8 @@ function simWildlife(state: GameState, world: World, safe: boolean): void {
         c.activity = "Defending its territory";
         if (cheb(c.x, c.y, rival.x, rival.y) <= 1) {
           rival.hpFrac = Math.max(0.1, rival.hpFrac - (0.05 + rng.next() * 0.1));
+          // scrapping is mutual: the intruder lands blows of its own
+          if (rng.chance(0.3)) c.hpFrac = Math.max(0.15, c.hpFrac - (0.04 + rng.next() * 0.08));
           if (rng.chance(0.5)) {
             rival.disposition = "skittish";
             rival.calmUntil = state.tick + 120;
@@ -722,6 +728,20 @@ function simWildlife(state: GameState, world: World, safe: boolean): void {
 
     if (c.satiety < 45) {
       const diet = sp.diet;
+      // scavengers first: remains within smell range beat a risky hunt
+      if (diet === "carnivore" || diet === "omnivore") {
+        const carr = nearestCarrion(state, c, CARRION_SIGHT);
+        if (carr) {
+          c.activity = "Feeding on a kill";
+          if (cheb(c.x, c.y, carr.x, carr.y) <= 1) {
+            eatCarrion(state, carr.id);
+            c.satiety = Math.min(100, c.satiety + SCAVENGE_FOOD);
+            c.hpFrac = Math.min(1, c.hpFrac + 0.04);
+            if (cheb(carr.x, carr.y, px, py) <= 12 && rng.chance(0.5)) addLog(state, `A ${sp.name} tears at what is left of a ${SPECIES[carr.speciesId].name}.`, "event");
+          } else if (moves || rng.chance(0.5)) stepToward(c, carr.x, carr.y, false);
+          continue;
+        }
+      }
       if (diet === "carnivore" || (diet === "omnivore" && c.satiety < 25)) {
         const prey = per.prey;
         if (prey) {
@@ -733,12 +753,18 @@ function simWildlife(state: GameState, world: World, safe: boolean): void {
               state.removed[prey.id] = state.tick;
               releaseTerritoryOwner(state, prey.id);
               ecoOnCreatureDeath(state, prey);
+              spawnCarrion(state, prey);
               delete state.creatures[prey.id];
               occDel(occ, prey, state.tick);
               c.satiety = Math.min(100, c.satiety + 60);
               if (cheb(c.x, c.y, px, py) <= 12) addLog(state, `${compass(c.x - px, c.y - py).replace(/^to the/, "Off to the")}, a ${sp.name} catches a ${pname}. The struggle is brief.`, "event");
             } else if (cheb(c.x, c.y, px, py) <= 8 && rng.chance(0.4)) {
-              addLog(state, `A ${sp.name} lunges at a ${pname}, which tears free and bolts.`, "event");
+              // cornered prey fights back: some hunts cost the hunter
+              const kicks = prey.disposition === "aggressive" || prey.personality === "brave" || prey.level >= c.level - 1;
+              if (kicks && rng.chance(0.5)) {
+                c.hpFrac = Math.max(0.08, c.hpFrac - (0.05 + rng.next() * 0.12));
+                addLog(state, `A ${sp.name} lunges at a ${pname}, which kicks and tears free.`, "event");
+              } else addLog(state, `A ${sp.name} lunges at a ${pname}, which tears free and bolts.`, "event");
             }
           } else if (moves || rng.chance(0.5)) stepToward(c, prey.x, prey.y, false);
           continue;
@@ -748,8 +774,48 @@ function simWildlife(state: GameState, world: World, safe: boolean): void {
       if (item && ITEMS[item].diets.includes(diet)) {
         c.satiety = Math.min(100, c.satiety + 35);
         state.depleted[`${c.x},${c.y}`] = state.tick;
+        c.seek = null;
         c.activity = `Eating ${ITEMS[item].name.toLowerCase()}`;
         continue;
+      }
+      // a hungry plant-eater walks to food it can smell (surface only; scans staggered per body)
+      if (layer === SURFACE) {
+        const seekItem = (s: { x: number; y: number }): ItemId | null => {
+          if (cheb(s.x, s.y, home.x, home.y) > 16) return null;
+          const it = world.forage(s.x, s.y, state.tick, state.depleted);
+          return it && ITEMS[it].diets.includes(diet) ? it : null;
+        };
+        if (c.seek && !seekItem(c.seek)) c.seek = null;
+        if (!c.seek && (state.tick + hashString(c.id)) % 6 === 0) {
+          outer: for (let r = 1; r <= 6; r++) {
+            for (let dy = -r; dy <= r; dy++) {
+              for (let dx = -r; dx <= r; dx++) {
+                if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+                const s = { x: c.x + dx, y: c.y + dy };
+                if (world.inBounds(s.x, s.y) && seekItem(s)) {
+                  c.seek = s;
+                  break outer;
+                }
+              }
+            }
+          }
+        }
+        if (c.seek) {
+          const it = seekItem(c.seek);
+          if (it && cheb(c.x, c.y, c.seek.x, c.seek.y) <= 1) {
+            c.satiety = Math.min(100, c.satiety + 35);
+            state.depleted[`${c.seek.x},${c.seek.y}`] = state.tick;
+            c.seek = null;
+            c.activity = `Eating ${ITEMS[it].name.toLowerCase()}`;
+            continue;
+          }
+          if (it) {
+            c.activity = `Seeking ${ITEMS[it].name.toLowerCase()}`;
+            if (moves || rng.chance(0.5)) stepToward(c, c.seek.x, c.seek.y, false);
+            continue;
+          }
+          c.seek = null;
+        }
       }
       c.activity = diet === "carnivore" ? "Prowling for prey" : "Foraging";
       if (moves) {
@@ -847,6 +913,7 @@ function ecoRemove(state: GameState, id: string, cause: "juvenile" | "scarcity")
   abandonNestsOf(state, id);
   releaseTerritoryOwner(state, id);
   ecoOnCreatureDeath(state, c);
+  spawnCarrion(state, c);
   delete state.creatures[id];
   if (cheb(c.x, c.y, state.player.x, state.player.y) <= 12) {
     addLog(
@@ -905,6 +972,8 @@ export function advance(state: GameState, ticks: number, safe = false): void {
       }
     }
     simWildlife(state, world, safe);
+    // remains rot away on their own clock; scavengers keep the ground clean
+    rotTick(state);
     // distant regions keep evolving while the player is away (bounded work per tick)
     advanceDistantEcosystem(state, world);
     // reproductive state follows simulation time: cooldowns tick down, development completes

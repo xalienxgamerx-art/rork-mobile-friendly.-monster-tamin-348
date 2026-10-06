@@ -11,6 +11,7 @@ import { migrateGrowth } from "./growth";
 import { migrateEcology } from "./ecology";
 import { migrateLineages } from "./lineage";
 import { migrateDistant } from "./distant";
+import { migrateCarrion } from "./carrion";
 import { getWorld } from "./world";
 import { migrateFactionKnowledge } from "./factions";
 import { ensureKnowledge } from "./knowledge";
@@ -159,6 +160,8 @@ export function loadSave(): boolean {
     migrateLineages(gs);
     // v18 distant worlds: abstract population state — idempotent, runs on every load
     migrateDistant(gs);
+    // v19 food web: carrion state — idempotent, runs on every load
+    migrateCarrion(gs);
     gs.version = SAVE_VERSION;
     if (gs.version !== SAVE_VERSION) return false;
     store.gs = gs;

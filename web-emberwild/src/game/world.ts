@@ -445,7 +445,9 @@ export class World {
     return { id, temp, humidity, wind, cloud };
   }
 
-  /** Whether a forageable item is present here right now, given depletion records. */
+  /** Whether a forageable item is present here right now, given depletion records.
+   *  Placement is stable per seed — plants are physical map objects that deplete
+   *  when eaten and regrow after two days, they do not pop in and out. */
   forage(x: number, y: number, tick: number, depleted: Record<string, number>): ItemId | null {
     const t = this.tile(x, y);
     const b = BIOMES[t.biome];
@@ -455,8 +457,7 @@ export class World {
     if (dep !== undefined && tick - dep < DAY_TICKS * 2) return null;
     const season = seasonIndex(tick);
     const mult = season === 3 ? 0.45 : season === 1 ? 1.15 : 1;
-    const window = Math.floor(tick / (DAY_TICKS * 2));
-    const roll = hash01(this.seed ^ (0xf00d + window), x, y);
+    const roll = hash01(this.seed ^ 0xf00d, x, y);
     if (roll > b.forageChance * mult) return null;
     const h = hash2(this.seed ^ 0xf11d, x, y);
     const total = b.forage.reduce((a, [, w]) => a + w, 0);

@@ -2,7 +2,7 @@
 import { discoveredList, ensureKnowledge, tileVisibility, anyExplored, exploredWorldCells, isRegionSeen } from "../src/game/knowledge";
 import { aggrOf, avOf, dvOf, engage, hitInfo, initField, partyFighter, partyMonAt, queueSkill, setAggr, setOrder, setTarget, terrainAt, wildFighter } from "../src/game/combat";
 import { CHUNK, advance, chunkKey, creatureAt, loadChunks, newGame, movePlayer, previewStarter, requestBreeding, spawnLairPack, waitTurn, wildToMonster } from "../src/game/sim";
-import { BIOMES, ITEMS, SCARVES, SPECIES, footprintOf, developmentTypeFor } from "../src/game/data";
+import { BIOMES, DAY_TICKS, ITEMS, SCARVES, SPECIES, footprintOf, developmentTypeFor } from "../src/game/data";
 import { abandonNestsOf, advanceDevelopment, beginBreeding, destroyNest, migrateBreeding, offspringSpecies, planChild, previewBreeding } from "../src/game/breeding";
 import { Factions, getFactions, migrateFactionKnowledge } from "../src/game/factions";
 import { GENE_KEYS, driftGenome, expressGene, getGeneGrade, getMonsterFootprint, inheritGene, inheritGenome, migrateBiology, migrateCreatureBio, migrateMonsterBio, migrateMonsterGenes, mutateDelta, mutateGene, sanitizeGenome, sizeToFootprint, wildGenotypeFromSeed } from "../src/game/genetics";
@@ -13,10 +13,11 @@ import { Rng, hashString } from "../src/game/rng";
 import { hasLOS } from "../src/game/perception";
 import { sampleCell } from "../src/game/mapview";
 import { getWorld, seedFromText, type Feature } from "../src/game/world";
-import type { ChildBlueprint, Disposition, DistantRegion, GameState, GeneKey, GenePair, Genes, Genome, Monster, ReproductiveDevelopment, Sex, WildCreature } from "../src/game/types";
+import type { ChildBlueprint, Disposition, DistantRegion, GameState, GeneKey, GenePair, Genes, Genome, ItemId, Monster, ReproductiveDevelopment, Sex, WildCreature } from "../src/game/types";
 import { childrenOf, lineageSummary, migrateLineages, recordLineageBirth, relatedness } from "../src/game/lineage";
 import { profileOf, seizeTerritory } from "../src/game/wildlife";
 import { DISTANT_INTERVAL, MAT_CAP_REGION, advanceDistantEcosystem, distantKey, migrateDistant, stepRegion } from "../src/game/distant";
+import { CARRION_CAP, CARRION_DAYS, migrateCarrion, spawnCarrion } from "../src/game/carrion";
 import { performance } from "node:perf_hooks";
 import { readFileSync } from "node:fs";
 import { HERO_ASPECT, isScarfPixel, parseHex, scarfShade } from "../src/game/scarf";
@@ -739,7 +740,7 @@ ok(
 // save round trip: live-combat state persists
 const json = JSON.stringify(gs);
 const loaded = JSON.parse(json);
-ok(loaded.version === 18, "save version 18");
+ok(loaded.version === 19, "save version 19");
 ok(loaded.field && loaded.orders && loaded.ground && loaded.fighters && loaded.aggr && loaded.skillQ && "target" in loaded, "live-combat state persists");
 ok(Object.keys(loaded.knowledge.explored).length === after, "explored persists exactly");
 
@@ -2442,7 +2443,7 @@ console.log("\n-- ECOLOGY --");
   ok(teleported && Object.keys(g.creatures).length >= 3, `spawning still works in unclaimed wilds (${Object.keys(g.creatures).length} residents)`);
   advance(g, 90);
   ok(g.party[0].hp >= 0 && Object.keys(g.creatures).length <= CREATURE_CAP, "advance() runs cleanly with the ecology tick wired in");
-  ok(g.version === 18, "save version 18");
+  ok(g.version === 19, "save version 19");
   migrateEcology(g);
   const snap = JSON.stringify(g.ecology);
   migrateEcology(g);
@@ -2658,6 +2659,11 @@ console.log("\n-- WILDLIFE --");
     // predator pursuit
     const hawk = mkWild("w:hawk", "zephyr_hawk", base, { satiety: 20, level: 8, maxR: 5 });
     const snack = hawk ? mkWild("w:snack", "slimekin", hawk, { satiety: 80, maxR: 3 }) : null;
+    // a fresh kill lying nearby must not outrank the hunt this check studies
+    for (const id of Object.keys(g.carrion ?? {})) {
+      const m = (g.carrion ?? {})[id];
+      if (hawk && cheb2(m, hawk) <= 9) delete g.carrion[id];
+    }
     const dh = hawk && snack ? cheb2(hawk, snack) : 99;
     let minD = dh;
     let sawHunt = false;
@@ -2938,6 +2944,190 @@ console.log("\n-- WILDLIFE --");
     delete legacy.distant;
     migrateDistant(legacy);
     ok(!!legacy.distant && Object.keys(legacy.distant).length === 0, "older saves gain distant-state defaults through migration");
+  }
+}
+
+/* ---------------- Phase 12: food web — plants, carrion, wild fights ---------------- */
+{
+  const fg = newGame("MAPCHECK-1", "Rook", "ranger", "#e8742a", previewStarter("MAPCHECK-1", "mossback"));
+  const fw = getWorld(fg.seed);
+  const openSpot = (x0: number, y0: number): { x: number; y: number } | null => {
+    for (let r = 0; r < 30; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const x = x0 + dx;
+          const y = y0 + dy;
+          if (!fw.inBounds(x, y) || !fw.passable(x, y) || fw.tile(x, y).feature || fw.siteAt(x, y)) continue;
+          if (creatureAt(fg, x, y) || (x === fg.player.x && y === fg.player.y)) continue;
+          return { x, y };
+        }
+      }
+    }
+    return null;
+  };
+  const home0 = openSpot(fg.player.x, fg.player.y);
+  ok(home0 !== null, "open wild ground exists for the food-web checks");
+  if (home0) {
+    fg.player.x = home0.x;
+    fg.player.y = home0.y;
+    fg.field = {};
+    initField(fg);
+    loadChunks(fg);
+    // controlled cast: only the bodies crafted below act
+    for (const id of Object.keys(fg.creatures)) delete fg.creatures[id];
+
+    const mkBody = (id: string, speciesId: string, pos: { x: number; y: number }, satiety: number): WildCreature => {
+      const c: WildCreature = {
+        id, speciesId, level: 5, x: pos.x, y: pos.y, homeX: pos.x, homeY: pos.y,
+        hpFrac: 1, satiety, disposition: "calm", activity: "Wandering", personality: "gentle",
+        geneSeed: 7000 + hashString(id), genes: wildGenotypeFromSeed(7000 + hashString(id), speciesId), gen: 1, lineageId: `L:${id}`,
+        repro: makeReproProfile(wildReproMode(id, speciesId), 5, 0),
+        calmUntil: 0, alpha: false, affection: 0, stalking: false,
+      };
+      fg.creatures[id] = c;
+      return c;
+    };
+    const findPlant = (): { x: number; y: number; item: ItemId } | null => {
+      let best: { x: number; y: number; item: ItemId } | null = null;
+      let bd = 99;
+      for (let dy = -14; dy <= 14; dy++) {
+        for (let dx = -14; dx <= 14; dx++) {
+          const x = home0.x + dx;
+          const y = home0.y + dy;
+          if (!fw.inBounds(x, y) || !fw.passable(x, y) || fw.tile(x, y).feature || fw.siteAt(x, y)?.wall) continue;
+          if (creatureAt(fg, x, y) || (x === fg.player.x && y === fg.player.y)) continue;
+          const it = fw.forage(x, y, fg.tick, fg.depleted);
+          if (!it || !ITEMS[it].diets.includes("herbivore")) continue;
+          const d = Math.max(Math.abs(dx), Math.abs(dy));
+          if (d < bd) {
+            bd = d;
+            best = { x, y, item: it };
+          }
+        }
+      }
+      return best;
+    };
+
+    // ---- plants are physical objects: stable, deplete, regrow ----
+    const plant = findPlant();
+    ok(plant !== null, "forage plants grow within reach of the party");
+    if (plant) {
+      ok(fw.forage(plant.x, plant.y, fg.tick, fg.depleted) === plant.item, "a plant stands where it grew (stable placement, not a per-look dice roll)");
+      const dep = { ...fg.depleted, [`${plant.x},${plant.y}`]: fg.tick };
+      ok(fw.forage(plant.x, plant.y, fg.tick, dep) === null, "a grazed plant is gone while depleted");
+      ok(fw.forage(plant.x, plant.y, fg.tick + 2 * DAY_TICKS + 1, dep) === plant.item, "plants regrow on the same spot after two days");
+      const e1 = mkBody("fd1", "mossback", plant, 30);
+      const s0 = e1.satiety;
+      advance(fg, 1);
+      ok(e1.satiety > s0 && fg.depleted[`${plant.x},${plant.y}`] !== undefined, "a hungry herbivore eats the plant it stands on and depletes it");
+      const plant2 = findPlant();
+      ok(plant2 !== null, "another plant grows within reach");
+      if (plant2) {
+        let ps: { x: number; y: number } | null = null;
+        // rings 3–5 stay inside the creature's scan radius (6), and the spot must be food-free
+        for (let r = 3; r <= 5 && !ps; r++) {
+          for (let dy = -r; dy <= r && !ps; dy++) {
+            for (let dx = -r; dx <= r && !ps; dx++) {
+              if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+              const x = plant2.x + dx;
+              const y = plant2.y + dy;
+              if (!fw.inBounds(x, y) || !fw.passable(x, y) || fw.tile(x, y).feature || fw.siteAt(x, y)?.wall) continue;
+              if (creatureAt(fg, x, y) || cheb(x, y, fg.player.x, fg.player.y) > 26) continue;
+              if (fw.forage(x, y, fg.tick, fg.depleted)) continue;
+              ps = { x, y };
+            }
+          }
+        }
+        if (ps) {
+          // the world is food-dense: clear every other plant around the start so
+          // the walk-to-food rule is the only way to eat
+          for (let dy = -8; dy <= 8; dy++) {
+            for (let dx = -8; dx <= 8; dx++) {
+              const x = ps.x + dx;
+              const y = ps.y + dy;
+              if (x === plant2.x && y === plant2.y) continue;
+              if (fw.forage(x, y, fg.tick, fg.depleted)) fg.depleted[`${x},${y}`] = fg.tick;
+            }
+          }
+          // pick an id whose staggered scan phase fires on the first tick, so
+          // the walk starts before wander noise can carry the body off course
+          let sid = "fd2";
+          for (let k = 0; k < 40; k++) {
+            if ((fg.tick + 1 + hashString(`fd2-${k}`)) % 6 === 0) {
+              sid = `fd2-${k}`;
+              break;
+            }
+          }
+          mkBody(sid, "mossback", ps, 30);
+          advance(fg, 14);
+          const at = fg.creatures[sid];
+          ok(fg.depleted[`${plant2.x},${plant2.y}`] !== undefined || (at !== undefined && cheb(at.x, at.y, plant2.x, plant2.y) <= 2), "a hungry herbivore walks to a plant it can smell");
+        } else ok(false, "a standing spot exists for the foraging-walk check");
+      }
+    }
+
+    // ---- a wild kill leaves carrion; a scavenger feeds; carrion rots ----
+    for (const id of Object.keys(fg.creatures)) if (id !== "fd1" && id !== "fd2") delete fg.creatures[id];
+    const preySpot = openSpot(home0.x, home0.y);
+    ok(preySpot !== null, "a free tile exists for the hunt");
+    if (preySpot) {
+      // the predator is crafted FIRST: bodies act in creation order, so it
+      // strikes before the prey can flee — one lunge (min 0.3) beats hp 0.2
+      const pred = mkBody("pd1", "cindermaw", preySpot, 10);
+      const preySpot2 = openSpot(preySpot.x, preySpot.y) ?? { x: preySpot.x + 1, y: preySpot.y };
+      const prey = mkBody("pr1", "slimekin", preySpot2, 80);
+      prey.hpFrac = 0.2;
+      const predAt = { x: pred.x, y: pred.y };
+      if (cheb(predAt.x, predAt.y, prey.x, prey.y) > 1) {
+        pred.x = prey.x + 1;
+        pred.y = prey.y;
+      }
+      let caught = false;
+      for (let i = 0; i < 12 && !caught; i++) {
+        advance(fg, 1);
+        caught = fg.creatures["pr1"] === undefined;
+      }
+      ok(caught, "a hungry predator hunts down and catches prey");
+      ok((fg.creatures["pd1"]?.hpFrac ?? 0) > 0, "cornered prey fights back, but the hunter survives the scrap");
+      const ca = Object.values(fg.carrion ?? {}).find((m) => m.speciesId === "slimekin");
+      ok(!!ca && ca.portions >= 1, "the fallen body leaves carrion where it died");
+      if (ca) {
+        const sc = mkBody("sc1", "cindermaw", openSpot(ca.x, ca.y) ?? { x: ca.x, y: ca.y + 1 }, 10);
+        const portions0 = ca.portions;
+        advance(fg, 1);
+        ok(sc.satiety > 10 && ((fg.carrion ?? {})[ca.id] === undefined || (fg.carrion ?? {})[ca.id].portions < portions0), "a scavenger feeds on the remains");
+        for (const it of Object.values(fg.carrion ?? {})) it.born = fg.tick - CARRION_DAYS * DAY_TICKS - 1;
+        advance(fg, 1);
+        ok(Object.keys(fg.carrion ?? {}).length === 0, "carrion rots away after its lifespan");
+      }
+    }
+    // ---- technical cap and save migration ----
+    const junk = openSpot(home0.x, home0.y) ?? { x: home0.x, y: home0.y };
+    for (let i = 0; i < CARRION_CAP + 10; i++) {
+      spawnCarrion(fg, mkBody(`junk${i}`, "slimekin", junk, 50));
+      delete fg.creatures[`junk${i}`];
+    }
+    ok(Object.keys(fg.carrion ?? {}).length <= CARRION_CAP, `carrion is bounded (${CARRION_CAP} tracked, oldest rot first)`);
+    const legacy = JSON.parse(JSON.stringify(fg)) as GameState;
+    delete legacy.carrion;
+    legacy.carrionSeq = undefined;
+    migrateCarrion(legacy);
+    migrateCarrion(legacy);
+    ok(!!legacy.carrion && legacy.carrionSeq === 0 && Object.keys(legacy.carrion).length === 0, "older saves gain carrion defaults through migration (idempotent)");
+  }
+
+  // ---- the hamlet folk ----
+  const ham = getWorld(gs.seed).featuresNear(gs.player.homeX, gs.player.homeY, 8).find((f) => f.kind === "hamlet");
+  ok(!!ham, "the home hamlet stands where the walk began");
+  if (ham) {
+    const hw = getWorld(gs.seed);
+    const folk = hw.hamletNpcs(ham);
+    ok(folk.length === 3, "every hamlet fields its three folk");
+    ok(JSON.stringify(folk.map((n) => n.role).sort()) === JSON.stringify(["innkeep", "penkeeper", "trader"]), "the folk cover inn, pen and trade");
+    ok(JSON.stringify(folk) === JSON.stringify(hw.hamletNpcs(ham)), "hamlet folk are deterministic (same seed, same people, same posts)");
+    ok(folk.every((n) => !hw.siteAt(n.x, n.y)?.wall), "the folk stand on walkable ground by their doors");
+    ok(folk.every((n) => hw.npcAt(n.x, n.y)?.name === n.name), "npcAt resolves each folk member at their post");
   }
 }
 

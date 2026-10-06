@@ -19,6 +19,13 @@ export const NEST_ART = {
   nest_eggs: "/monsters/v2/nest_eggs.png",
 } as const;
 
+// Hamlet folk portraits, processed from the role art by: bun scripts/npcs.ts
+export const NPC_ART = {
+  innkeep: "/npcs/innkeep.png",
+  trader: "/npcs/trader.png",
+  penkeeper: "/npcs/penkeeper.png",
+} as const;
+
 export const MUSIC = {
   wilds: `${A}/aud/78b47f55-05a0-41cc-9936-686bc768b87f.mp3`,
   battle: `${A}/aud/d2d06a16-f11e-4d3c-90fd-9d80cbd1dcba.mp3`,

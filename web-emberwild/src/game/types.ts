@@ -169,6 +169,8 @@ export interface WildCreature {
   territoryId?: string;
   /** Vertical layer: absent = surface, -1 upper caves, -2 deep caves. */
   layer?: number;
+  /** Tile this hungry body is walking to for a plant it smelled (transient; re-validated each use). */
+  seek?: { x: number; y: number } | null;
 }
 
 export type LogKind = "info" | "event" | "combat" | "system" | "good" | "bad" | "weather";
@@ -449,6 +451,23 @@ export interface DistantRegion {
   abstracted: boolean;
 }
 
+/**
+ * A fallen body's remains (Phase 12 food web): real map objects that scavengers
+ * seek and eat, and that rot away after a fixed lifespan.
+ */
+export interface Carrion {
+  id: string;
+  speciesId: string;
+  x: number;
+  y: number;
+  /** Vertical layer (absent = surface). */
+  layer?: number;
+  /** Tick the body fell. */
+  born: number;
+  /** Eating charges left — big bodies feed more mouths. */
+  portions: number;
+}
+
 export interface GameState {
   version: number;
   seedText: string;
@@ -505,5 +524,9 @@ export interface GameState {
   childIndex?: Record<string, string[]>;
   /** Abstract distant populations, key = `d:<layer>:<cx>,<cy>` (Phase 11; backfilled by migrateDistant). */
   distant?: Record<string, DistantRegion>;
+  /** Fallen remains that scavengers eat and time rots, key = carrion id (backfilled by migrateCarrion). */
+  carrion?: Record<string, Carrion>;
+  /** Id counter for carrion. */
+  carrionSeq?: number;
   knowledge: WorldKnowledge;
 }

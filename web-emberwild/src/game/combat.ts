@@ -13,6 +13,7 @@
  * reproduce the same fight exactly.
  */
 import { abandonNestsOf } from "./breeding";
+import { spawnCarrion } from "./carrion";
 import { SKILLS, SPECIES, STATUSES, elementMult, type SkillDef } from "./data";
 import { wildGenotypeFromSeed } from "./genetics";
 import { bodyFootprint } from "./growth";
@@ -554,6 +555,7 @@ function killWild(gs: GameState, f: Fighter): void {
   abandonNestsOf(gs, c.id);
   releaseTerritoryOwner(gs, c.id);
   ecoOnCreatureDeath(gs, c);
+  spawnCarrion(gs, c);
   delete gs.creatures[c.id];
   delete gs.fighters[c.id];
   if (gs.target === c.id) gs.target = null;

@@ -1,5 +1,5 @@
 import { rngNext } from "./rng";
-import type { BiomeId, FeatureId, Terrain } from "./types";
+import type { BiomeId, FeatureId, ItemId, Terrain } from "./types";
 
 /** Procedural 16×16 pixel-art textures for biomes, features and battle terrain. */
 const PX = 16;
@@ -859,6 +859,124 @@ export function shaftTex(up: boolean): HTMLCanvasElement {
       px(ctx, 6, y, "#a08554");
       px(ctx, 9, y, "#a08554");
       if (y % 4 === 0) for (let x = 6; x <= 9; x++) px(ctx, x, y, "#c9a36a");
+    }
+  });
+}
+
+/* ------------------------------ Forage & carrion ------------------------------ */
+
+/**
+ * A forageable plant (stage 0) or its grazed stub (stage 1), drawn on the
+ * ground of any biome that grows it.
+ */
+export function forageTex(item: ItemId, stage: 0 | 1): HTMLCanvasElement {
+  return make(`fd:${item}:${stage}`, 61 + item.length * 7 + stage * 13, (ctx, r) => {
+    if (stage === 1) {
+      for (const [x, h] of [[5, 3], [7, 4], [9, 2], [11, 3]] as const) {
+        for (let y = 0; y < h; y++) px(ctx, x, 14 - y, y === h - 1 ? "#9a8a54" : "#6f6a45");
+      }
+      px(ctx, 6, 12, "#55613a");
+      px(ctx, 10, 13, "#55613a");
+      return;
+    }
+    switch (item) {
+      case "berries": {
+        for (let y = 9; y <= 14; y++) {
+          for (let x = 4; x <= 11; x++) {
+            if (Math.hypot(x - 7.5, (y - 12.4) * 1.15) < 3.6) px(ctx, x, y, x < 7 ? "#3e7a34" : shade("#3e7a34", 0.82));
+          }
+        }
+        for (const [bx, by] of [[5, 10], [8, 9], [10, 11], [6, 12], [9, 13], [4, 12]] as const) {
+          px(ctx, bx, by, "#c2334a");
+          px(ctx, bx, by - 1, shade("#c2334a", 1.3));
+        }
+        break;
+      }
+      case "nuts": {
+        px(ctx, 6, 10, "#6b4a2b"); px(ctx, 7, 9, "#6b4a2b"); px(ctx, 8, 10, "#6b4a2b");
+        for (const [nx, ny] of [[5, 13], [8, 12], [10, 14]] as const) {
+          px(ctx, nx, ny, "#a0723a");
+          px(ctx, nx + 1, ny, shade("#a0723a", 1.2));
+          px(ctx, nx, ny - 1, "#5c3d20");
+        }
+        break;
+      }
+      case "mushroom": {
+        const cap = "#cdb7e6";
+        const capD = shade(cap, 0.8);
+        for (let x = 5; x <= 10; x++) { px(ctx, x, 10, x < 8 ? cap : capD); px(ctx, x, 11, x < 8 ? capD : cap); }
+        px(ctx, 6, 9, cap); px(ctx, 9, 9, capD);
+        px(ctx, 7, 12, "#e8e2f2"); px(ctx, 8, 12, "#e8e2f2"); px(ctx, 7, 13, "#cfc8dd"); px(ctx, 8, 13, "#cfc8dd");
+        px(ctx, 11, 12, cap); px(ctx, 12, 12, capD);
+        px(ctx, 11, 13, "#e8e2f2"); px(ctx, 12, 13, "#cfc8dd");
+        px(ctx, 4, 13, "#3e7a34");
+        break;
+      }
+      case "herb": {
+        for (const [lx, ly] of [[6, 12], [8, 11], [10, 13]] as const) {
+          px(ctx, lx, ly, "#5fae4e");
+          px(ctx, lx - 1, ly - 1, "#4c8f3f");
+          px(ctx, lx + 1, ly - 1, "#6fc25e");
+          px(ctx, lx, ly - 2, "#4c8f3f");
+        }
+        break;
+      }
+      case "fish": {
+        ctx.fillStyle = "rgba(230,244,252,0.5)";
+        ctx.fillRect(3, 9, 10, 5);
+        for (let x = 4; x <= 11; x++) {
+          px(ctx, x, 11, x % 2 ? "#7fb7d6" : "#b8dcf0");
+          px(ctx, x, 12, "#5e97ba");
+        }
+        px(ctx, 4, 11, "#4d7f9e"); px(ctx, 3, 10, "#b8dcf0"); px(ctx, 3, 12, "#b8dcf0");
+        px(ctx, 12, 10, "#7fb7d6"); px(ctx, 12, 12, "#7fb7d6");
+        px(ctx, 8, 11, "#314b5c");
+        break;
+      }
+      case "honeycomb": {
+        for (let y = 10; y <= 14; y++) for (let x = 5; x <= 10; x++) if (y < 13 || (x > 5 && x < 10)) px(ctx, x, y, x < 8 ? "#f2c14e" : shade("#f2c14e", 0.82));
+        px(ctx, 7, 11, "#b8862e"); px(ctx, 9, 12, "#b8862e");
+        px(ctx, 6, 10, "#ffe08a");
+        break;
+      }
+      case "cactus_fruit": {
+        for (let y = 9; y <= 14; y++) for (let x = 6; x <= 9; x++) px(ctx, x, y, x < 8 ? "#4f8a3c" : shade("#4f8a3c", 0.8));
+        px(ctx, 7, 8, "#e05a8a"); px(ctx, 8, 8, "#e05a8a"); px(ctx, 7, 7, "#f08ab0"); px(ctx, 8, 9, "#b03a6a");
+        px(ctx, 5, 11, "#d9b46a"); px(ctx, 10, 12, "#d9b46a");
+        break;
+      }
+      case "ore": {
+        for (const [ox, oy, s] of [[6, 12, 1], [9, 13, 0.8], [8, 10, 0.6]] as const) {
+          px(ctx, ox, oy, "#a7b4c2");
+          px(ctx, ox + 1, oy, shade("#a7b4c2", s));
+          px(ctx, ox, oy - 1, shade("#a7b4c2", 1.25));
+        }
+        px(ctx, 7, 13, "#6d7a88"); px(ctx, 10, 11, "#6d7a88");
+        break;
+      }
+      default:
+        tufts(ctx, r, "#5fae4e", 4, true);
+    }
+  });
+}
+
+/** Fallen remains: fresh (stage 0) or aging (stage 1). */
+export function carrionTex(stage: 0 | 1): HTMLCanvasElement {
+  return make(`cr:${stage}`, 91 + stage * 7, (ctx) => {
+    const body = stage === 0 ? "#a34336" : "#71403a";
+    const dark = stage === 0 ? "#7e2f28" : "#4e2b26";
+    ctx.fillStyle = "rgba(10,8,20,0.22)";
+    ctx.fillRect(3, 14, 10, 1);
+    for (let x = 5; x <= 11; x++) {
+      const h = x > 6 && x < 10 ? 2 : 1;
+      for (let y = 0; y <= h; y++) px(ctx, x, 13 - y, x < 9 ? body : dark);
+    }
+    px(ctx, 7, 11, dark); px(ctx, 9, 11, dark);
+    px(ctx, 3, 13, "#e7e0d0"); px(ctx, 2, 12, "#e7e0d0"); px(ctx, 3, 12, "#c9bfae");
+    if (stage === 1) {
+      px(ctx, 6, 10, "#8a9a6a"); px(ctx, 10, 11, "#8a9a6a"); px(ctx, 8, 12, "#a5b478");
+    } else {
+      px(ctx, 6, 11, "#c96a54"); px(ctx, 10, 12, "#c96a54");
     }
   });
 }

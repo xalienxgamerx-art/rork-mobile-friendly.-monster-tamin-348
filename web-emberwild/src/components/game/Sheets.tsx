@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, Backpack, BedDouble, Coins, Flame, Home, PawPrint, ScrollText, Sparkles, Tent, Utensils } from "lucide-react";
 import { DAY_TICKS, ITEMS, PARTY_MAX, SHOP_STOCK, SPECIES, SYNTH_MIN_LEVEL, ELEMENTS } from "@/game/data";
+import { NPC_ART } from "@/game/assets";
 import { previewBreeding } from "@/game/breeding";
 import { canMate } from "@/game/mating";
 import { getFactions } from "@/game/factions";
@@ -272,9 +273,12 @@ export function NpcSheet({ gs, open, npc, onClose, onParty }: { gs: GameState; o
   return (
     <Sheet open={open} onClose={onClose} title={`${npc.name} · ${NPC_ROLE[npc.role]}`} icon={<Icon className="h-5 w-5" />}>
       <div className="space-y-3 p-3">
-        <div className="panel-parchment p-3">
-          <div className="font-serif text-sm font-bold">“{npc.line}”</div>
-          <div className="mt-1 font-mono text-[11px] opacity-60">{npc.name} of {hamletName}</div>
+        <div className="panel-parchment flex items-center gap-3 p-3">
+          <img src={NPC_ART[npc.role]} alt="" className="h-16 w-16 shrink-0 object-contain" style={{ imageRendering: "pixelated" }} />
+          <div>
+            <div className="font-serif text-sm font-bold">“{npc.line}”</div>
+            <div className="mt-1 font-mono text-[11px] opacity-60">{npc.name} of {hamletName}</div>
+          </div>
         </div>
         <div className="flex items-center justify-between font-pixel text-gold"><span className="flex items-center gap-2"><Coins className="h-4 w-4" /> {gs.player.gold} gold</span>{isHome ? <span className="text-xs text-teal">Home</span> : null}</div>
         {npc.role === "innkeep" ? (

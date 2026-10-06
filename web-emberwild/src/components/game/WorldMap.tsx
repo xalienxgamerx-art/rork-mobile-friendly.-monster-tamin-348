@@ -1,7 +1,8 @@
 import { memo, useEffect, useRef, useState } from "react";
-import { MONSTER_ART, NEST_ART } from "@/game/assets";
+import { MONSTER_ART, NEST_ART, NPC_ART } from "@/game/assets";
+import { carrionStage } from "@/game/carrion";
 import { activeFx } from "@/game/combat";
-import { BIOMES, SPECIES } from "@/game/data";
+import { BIOMES, DAY_TICKS, SPECIES } from "@/game/data";
 import { FACTION_CELL, getFactions } from "@/game/factions";
 import { bodyFootprint } from "@/game/growth";
 import { anyExplored, discoveredList, exploredWorldCells, isExploredOn, isRegionSeen } from "@/game/knowledge";
@@ -13,7 +14,7 @@ import { hash2 } from "@/game/rng";
 import { HERO_ASPECT, getTamerSprite, onTamerReady } from "@/game/scarf";
 import { getCleanSprite, onCleanSpriteReady } from "@/game/spritebg";
 import {
-  biomeTex, caveExitTex, caveFaceTex, caveFloorTex, caveMouthTex, caveWallTex, cliffFaceTex, featureTex, rampMarkTex, shaftTex, stairsTex, terrainTex, worldTex,
+  biomeTex, carrionTex, caveExitTex, caveFaceTex, caveFloorTex, caveMouthTex, caveWallTex, cliffFaceTex, featureTex, forageTex, rampMarkTex, shaftTex, stairsTex, terrainTex, worldTex,
 } from "@/game/tiles";
 import type { FeatureId, GameState } from "@/game/types";
 import { getWorld, timeOf } from "@/game/world";
@@ -272,6 +273,15 @@ export const WorldMap = memo(function WorldMap({ gs, v, scale, selected, path, r
             ctx.drawImage(terrainTex(st, sv), X, Y, ts, ts);
           }
           drawHeight(x, y, X, Y, variant);
+          // forage plants are physical: ripe where food grows, a grazed stub where picked clean
+          if (visHere && !t.feature && !world.siteAt(x, y)?.wall) {
+            const fi = world.forage(x, y, gs.tick, gs.depleted);
+            if (fi) ctx.drawImage(forageTex(fi, 0), X, Y, ts, ts);
+            else {
+              const dep = gs.depleted[`${x},${y}`];
+              if (dep !== undefined && gs.tick - dep < DAY_TICKS * 2) ctx.drawImage(forageTex("berries", 1), X, Y, ts, ts);
+            }
+          }
           const known = t.feature && (visHere || k.discovered[`f:${t.feature.x}:${t.feature.y}`]);
           // the lair's alpha body replaces the center icon on visible tiles
           if (t.feature && known && !(t.feature.kind === "lair" && visHere)) ctx.drawImage(featureTex(t.feature.kind), X, Y, ts, ts);
@@ -329,6 +339,18 @@ export const WorldMap = memo(function WorldMap({ gs, v, scale, selected, path, r
         ctx.ellipse(X + ts / 2, Y + ts * 0.88, w, ts * 0.11, 0, 0, Math.PI * 2);
         ctx.fill();
       };
+
+      // the fallen feed the living: carrion lies where a body died
+      for (const item of Object.values(gs.carrion ?? {})) {
+        if ((item.layer ?? 0) !== layer) continue;
+        if (Math.abs(item.x - px) > halfW + 2 || Math.abs(item.y - py) > halfH + 2) continue;
+        if (!vis.has(item.y * WORLD_SIZE + item.x)) continue;
+        const CX = wx2x(item.x);
+        const CY = wy2y(item.y);
+        shadow(CX, CY, ts * 0.18);
+        const cw = ts * 0.62;
+        ctx.drawImage(carrionTex(carrionStage(gs, item)), CX + (ts - cw) / 2, CY + ts * 0.36, cw, cw);
+      }
 
       // the real party — monsters are bodies on the map, trailing the player
       for (const m of gs.party) {
@@ -409,15 +431,22 @@ export const WorldMap = memo(function WorldMap({ gs, v, scale, selected, path, r
           if (!vis.has(n.y * WORLD_SIZE + n.x)) continue;
           const X = wx2x(n.x);
           const Y = wy2y(n.y);
-          shadow(X, Y, ts * 0.2);
-          const roleCol = n.role === "innkeep" ? "#b23a48" : n.role === "trader" ? "#e8a02b" : "#3fb8a5";
-          ctx.fillStyle = "#3a2c20";
-          ctx.fillRect(X + ts * 0.37, Y + ts * 0.64, ts * 0.1, ts * 0.2);
-          ctx.fillRect(X + ts * 0.53, Y + ts * 0.64, ts * 0.1, ts * 0.2);
-          ctx.fillStyle = roleCol;
-          ctx.fillRect(X + ts * 0.32, Y + ts * 0.36, ts * 0.36, ts * 0.32);
-          ctx.fillStyle = "#e8c49a";
-          ctx.fillRect(X + ts * 0.36, Y + ts * 0.16, ts * 0.28, ts * 0.22);
+          shadow(X, Y, ts * 0.24);
+          const im = getCleanSprite(NPC_ART[n.role]);
+          if (im) {
+            const h = ts * 1.42;
+            const w = (h * im.width) / im.height;
+            ctx.drawImage(im, X + (ts - w) / 2, Y + ts * 1.04 - h, w, h);
+          } else {
+            const roleCol = n.role === "innkeep" ? "#b23a48" : n.role === "trader" ? "#e8a02b" : "#3fb8a5";
+            ctx.fillStyle = "#3a2c20";
+            ctx.fillRect(X + ts * 0.37, Y + ts * 0.64, ts * 0.1, ts * 0.2);
+            ctx.fillRect(X + ts * 0.53, Y + ts * 0.64, ts * 0.1, ts * 0.2);
+            ctx.fillStyle = roleCol;
+            ctx.fillRect(X + ts * 0.32, Y + ts * 0.36, ts * 0.36, ts * 0.32);
+            ctx.fillStyle = "#e8c49a";
+            ctx.fillRect(X + ts * 0.36, Y + ts * 0.16, ts * 0.28, ts * 0.22);
+          }
           if (selected && selected.x === n.x && selected.y === n.y) {
             ctx.font = `bold ${Math.round(ts * 0.34)}px "Pixelify Sans", monospace`;
             ctx.lineWidth = 3;
